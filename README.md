@@ -55,14 +55,19 @@
 ## Что происходит с файлом
 
 - Сконвертированная копия кладётся в `%TEMP%\FormatWheel` и отдаётся получателю, как только готова. Пока идёт конвертация, у курсора видна карточка с кольцом прогресса.
-- Если бросить файл раньше, чем он готов (например, долгое видео), программа доделает его сама и положит в папку, куда его бросили (окно Проводника или рабочий стол), а если бросили не в папку — рядом с оригиналом. Об этом придёт уведомление.
+- Если бросить файл раньше, чем он готов (например, долгое видео), программа доделает его сама и положит в папку, куда его бросили (окно Проводника или рабочий стол), а если бросили не в папку — рядом с оригиналом. Пока доделывает, у значка программы в трее видна карточка с прогрессом; крестиком конвертацию можно отменить, по готовой карточке — открыть файл в Проводнике.
 - Папка копий чистится сама: при запуске и раз в час удаляется всё старше суток и лишнее сверх 2 ГБ. Свежее 10 минут не трогается — получатель мог ещё не забрать файл.
 
 Меню в трее: автозапуск, папка с копиями, журнал (`%TEMP%\FormatWheel\log.txt`), список расширений, папка расширений и их перезагрузка.
 
 ## Как написать своё расширение
 
-Расширение — это обычная .NET-библиотека (DLL), которая реализует интерфейс `IConverter` из пакета **FormatWheel.Sdk**.
+Расширение — это обычная .NET-библиотека (DLL) на пакете **FormatWheel.Sdk**. Оно может:
+
+- **конвертировать** — реализовать `IConverter`: на колесе лепестки форматов, на выходе новый файл, который тащат дальше;
+- **выполнять действия** — реализовать `IWheelActions` (SDK 1.1+): печать, отправка, открыть в программе — что угодно, после чего файл никуда тащить не нужно.
+
+Один класс может делать и то и другое.
 
 ### 1. Проект
 
@@ -74,7 +79,7 @@
     <AssemblyName>FormatWheel.MyThing</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="FormatWheel.Sdk" Version="1.0.*" />
+    <PackageReference Include="FormatWheel.Sdk" Version="1.1.*" />
   </ItemGroup>
 </Project>
 ```
@@ -85,7 +90,7 @@
 dotnet nuget add source C:\путь\к\папке -n formatwheel-sdk
 ```
 
-### 2. Класс
+### 2. Конвертер
 
 ```csharp
 using FormatWheel.Sdk;
@@ -129,7 +134,46 @@ public sealed class MyConverter : IConverter
 - **Долгие задачи** (`IsSlow = true`): если файл бросили раньше, чем он готов, программа всё равно доделает его и сохранит сама (см. «Что происходит с файлом»). Для быстрых (`false`) — только если конвертация ещё не успела закончиться. Поддерживайте отмену через `CancellationToken`: пользователь мог передумать посреди драга.
 - **Сторонние программы** (как FFmpeg или Pandoc): расширение их не несёт. Либо требуйте установки заранее, либо ставьте из своего установщика через winget — так делают расширения FFmpeg и Pandoc.
 
-### 3. Установщик
+### 3. Действия (SDK 1.1+)
+
+Когда результат — не файл, а что-то сделанное: напечатать, отправить, загрузить, открыть в нужной программе.
+
+```csharp
+using System.Diagnostics;
+using FormatWheel.Sdk;
+
+public sealed class PrintActions : IWheelActions
+{
+    public string Name => "Печать";
+
+    public bool CanHandle(string path) => path.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase);
+
+    public IReadOnlyList<WheelAction> ActionsFor(IReadOnlyList<string> files) => new[]
+    {
+        new WheelAction("Печать", "на принтер по умолчанию", (paths, report, ct) =>
+        {
+            for (int i = 0; i < paths.Count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                // ... отправляете paths[i] на печать (своим кодом или через свою библиотеку) ...
+                report((i + 1.0) / paths.Count);
+            }
+            return Task.CompletedTask;
+        }),
+    };
+}
+```
+
+Как это работает:
+
+- **Где лепестки:** действия встают в основное меню (Shift) после форматов. Если для файлов есть только действия, а конвертера нет (например, PDF и расширение печати), колесо откроется с одними действиями.
+- **Что происходит при выборе:** драг Проводника отменяется — оригинал никуда не уезжает, а действие выполняется в фоне. У значка программы в трее видна карточка с прогрессом (`report(0..1)`) и крестиком отмены (`ct`). Исключение из `Run` — красная карточка с его текстом.
+- **Поток:** `Run` вызывается в отдельном STA-потоке, поэтому из него можно показывать окна — например, свой диалог печати на WinForms или WPF.
+- **Файлы:** в `Run` приходят оригиналы, которые тащили. Если нужно сначала сконвертировать (Word → PDF → печать), сделайте это внутри действия.
+- **Кто показывает действия:** все расширения, у которых `CanHandle` вернул `true` для всех файлов, — их действия складываются в одно меню.
+- **Совместимость:** действия появились в SDK 1.1 и работают в программе с версии 1.0.7. Расширения на SDK 1.0 продолжают работать как раньше.
+
+### 4. Установщик
 
 Соберите DLL со всеми зависимостями, но без `FormatWheel.Sdk.dll` (она уже есть в программе). Каждое расширение — в своей подпапке:
 
@@ -151,7 +195,7 @@ Convert files on the fly while you drag them — a Windows take on the macOS “
 - **Install:** grab the installer from [FormatWheel-app releases](https://github.com/KantraCity/FormatWheel-app/releases). Windows 10 (1809) or 11, x64. Don’t run it elevated.
 - **Keys:** hold Shift for the wheel; Ctrl and Alt switch between up to four menus live, and each file type decides what sits on each slot. The keys you hold are highlighted on top of the wheel.
 - **The file:** the converted copy goes to `%TEMP%\FormatWheel` and is handed over as soon as it is ready. Dropped too early, it is finished and saved into the folder you dropped on (or next to the original). Old copies are cleaned up automatically.
-- **Write an extension:** a .NET DLL named `FormatWheel.*` that implements `IConverter` from **FormatWheel.Sdk** (the `.nupkg` is in the FormatWheel-app releases). Installers put extensions into `%LOCALAPPDATA%\Programs\FormatWheel\extensions\<name>\` (trusted); hand-dropped ones go to `%APPDATA%\FormatWheel\extensions\<name>\` and need confirmation. See the C# example above and the extension repositories for full templates.
+- **Write an extension:** a .NET DLL named `FormatWheel.*` on **FormatWheel.Sdk** (the `.nupkg` is in the FormatWheel-app releases). Implement `IConverter` to turn a file into another file, or `IWheelActions` (SDK 1.1+) for actions such as printing: their petals join the Shift menu, the Explorer drag is cancelled and the action runs in the background with progress and a cancel button next to the tray icon. Installers put extensions into `%LOCALAPPDATA%\Programs\FormatWheel\extensions\<name>\` (trusted); hand-dropped ones go to `%APPDATA%\FormatWheel\extensions\<name>\` and need confirmation. See the C# example above and the extension repositories for full templates.
 
 Verified extensions:
 
